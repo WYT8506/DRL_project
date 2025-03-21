@@ -23,7 +23,7 @@ if torch.cuda.is_available():
 def generate(model, tokenizer, input_ids, assistant_role_slice, gen_config=None):
     if gen_config is None:
         gen_config = model.generation_config
-        gen_config.max_new_tokens = 64
+        gen_config.max_new_tokens = 16
     input_ids = input_ids[:assistant_role_slice.stop].to(model.device).unsqueeze(0)
     attn_masks = torch.ones_like(input_ids).to(model.device)
     output_ids = model.generate(input_ids,
@@ -75,16 +75,15 @@ def get_args():
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=5)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--topk", type=int, default=128)
-    parser.add_argument("--num_steps", type=int, default=1000)
+    parser.add_argument("--num_steps", type=int, default=10000)
 
     parser.add_argument("--dataset_path", type=str, default="./data/uni_train.csv")
     parser.add_argument("--save_suffix", type=str, default="normal")
 
-    parser.add_argument("--model", type=str, default="llama2")
-    parser.add_argument("--injection", type=str, default="semi-dynamic")
-
+    parser.add_argument("--model", type=str, default="llama3")
+    parser.add_argument("--injection", type=str, default="static")
     args = parser.parse_args()
     return args
 
@@ -96,7 +95,7 @@ if __name__ == '__main__':
     model_path_dicts = {"llama2": "./models/llama2/llama-2-7b-chat-hf", "vicuna": "./models/vicuna/vicuna-7b-v1.3",
                         "guanaco": "./models/guanaco/guanaco-7B-HF", "WizardLM": "./models/WizardLM/WizardLM-7B-V1.0",
                         "mpt-chat": "./models/mpt/mpt-7b-chat", "mpt-instruct": "./models/mpt/mpt-7b-instruct",
-                        "falcon": "./models/falcon/falcon-7b-instruct"}
+                        "falcon": "./models/falcon/falcon-7b-instruct","llama3": "meta-llama/Meta-Llama-3-8B-Instruct"}
     model_path = model_path_dicts[args.model]
     template_name = args.model
     adv_string_init = generate_pattern(args.tokens)
@@ -151,6 +150,9 @@ if __name__ == '__main__':
                 new_next_grad[slices] = next_grad[slices]
                 next_grad = new_next_grad
             coordinate_grad += next_grad
+            # Clear GPU memory after each iteration
+            torch.cuda.empty_cache()
+
         if j != 0 and previous_coordinate_grad.size() != coordinate_grad.size():
             print(f"Aligning...\ncoordinate_grad: {coordinate_grad.size()}\nprevious_coordinate_grad: {previous_coordinate_grad.size()}")
             new_previous_grad = torch.zeros_like(coordinate_grad)
@@ -175,6 +177,7 @@ if __name__ == '__main__':
                       harmful_data.output[args.start:args.end], harmful_data.task[args.start:args.end],
                       harmful_data.dataset[args.start:args.end])
         losses = 0
+        completions = []
         for i, (instruction, input, output, task, dataset) in enumerate(dataset):
             conv_template = load_conversation_template(template_name)
             conv_template = modify_sys_prompts(conv_template, instruction, template_name)
@@ -188,6 +191,11 @@ if __name__ == '__main__':
 
             input_ids = suffix_manager.get_input_ids(adv_string=adv_suffix)
             input_ids = input_ids.to(device)
+            if i == 0:
+                completion = tokenizer.decode(
+                        (generate(model, tokenizer, input_ids, suffix_manager._assistant_role_slice))).strip()
+                print(f"completion: {completion}")
+                completions.append(completion)
             with torch.no_grad():
                 logits, ids = get_logits(model=model,
                                          tokenizer=tokenizer,
@@ -197,6 +205,9 @@ if __name__ == '__main__':
                                          return_ids=True,
                                          batch_size=batch_size)
                 losses += target_loss(logits, ids, suffix_manager._target_slice)
+            # Clear GPU memory after each iteration
+            torch.cuda.empty_cache()
+
         best_new_adv_suffix_id = losses.argmin()
         best_new_adv_suffix = new_adv_suffix[best_new_adv_suffix_id]
         current_loss = losses[best_new_adv_suffix_id] / (len(harmful_data.instruction[args.start:args.end]))
@@ -220,6 +231,7 @@ if __name__ == '__main__':
         info["total_time"] = cost_time
         info["final_suffix"] = adv_suffix
         info["target"] = target
+        info["completions"] = completions
         infos[j] = info
 
         if not os.path.exists(
