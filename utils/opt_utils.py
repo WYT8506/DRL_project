@@ -8,7 +8,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer, GPT2LMHeadModel,
 import random
 from pynvml import *
 import time
-from utils.string_utils import SuffixManager, load_conversation_template, query_target, modify_sys_prompts
+from utils.string_utils import SuffixManager
 def get_embedding_matrix(model):
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
         return model.transformer.wte.weight
@@ -17,7 +17,7 @@ def get_embedding_matrix(model):
     elif isinstance(model, GPTNeoXForCausalLM):
         return model.base_model.embed_in.weight
     else:
-        raise ValueError(f"Unknown model type: {type(model)}")
+        return model.model.embed_tokens.weight
 
 def get_embeddings(model, input_ids):
     if isinstance(model, GPTJForCausalLM) or isinstance(model, GPT2LMHeadModel):
@@ -27,7 +27,7 @@ def get_embeddings(model, input_ids):
     elif isinstance(model, GPTNeoXForCausalLM):
         return model.base_model.embed_in(input_ids).half()
     else:
-        raise ValueError(f"Unknown model type: {type(model)}")
+        return model.model.embed_tokens(input_ids)
 
 def token_gradients(model, input_ids, input_slice, target_slice, loss_slice, imitate_target=None):
     """
@@ -65,6 +65,7 @@ def token_gradients(model, input_ids, input_slice, target_slice, loss_slice, imi
         torch.ones(one_hot.shape[0], 1, device=model.device, dtype=embed_weights.dtype)
     )
     one_hot.requires_grad_()
+    
     input_embeds = (one_hot @ embed_weights).unsqueeze(0)
 
     # now stitch it together with the rest of the embeddings
@@ -78,13 +79,10 @@ def token_gradients(model, input_ids, input_slice, target_slice, loss_slice, imi
         dim=1)
 
     logits = model(inputs_embeds=full_embeds).logits
-    if imitate_target is not None:
-        compare = logits[0, loss_slice, :]
-        loss = nn.MSELoss()(compare, imitate_target)
-    else:
-        targets = input_ids[target_slice]
-        compare = logits[0, loss_slice, :]
-        loss = nn.CrossEntropyLoss()(compare, targets)
+
+    targets = input_ids[target_slice]
+    compare = logits[0, loss_slice, :]
+    loss = nn.CrossEntropyLoss()(compare, targets)
 
     loss.backward()
 
@@ -128,49 +126,9 @@ def sample_control(control_toks, grad, batch_size, topk=256, temp=1, not_allowed
         grad[:, not_allowed_tokens.to(grad.device)] = np.infty
 
     top_indices = (-grad).topk(topk, dim=1).indices
-    control_toks = control_toks.to(grad.device)
-
-    original_control_toks = control_toks.repeat(batch_size, 1)
-    new_token_pos = torch.arange(
-        0,
-        len(control_toks),
-        len(control_toks) / batch_size,
-        device=grad.device
-    ).type(torch.int64)
-    new_token_val = torch.gather(
-        top_indices[new_token_pos], 1,
-        torch.randint(0, topk, (batch_size, 1),
-                      device=grad.device)
-    )
-    new_control_toks = original_control_toks.scatter_(1, new_token_pos.unsqueeze(-1), new_token_val)
-
-    return new_control_toks
-def sample_control_kv_cache(control_toks, grad, batch_size, topk=256, temp=1, not_allowed_tokens=None):
-    if not_allowed_tokens is not None:
-        grad[:, not_allowed_tokens.to(grad.device)] = np.infty
-
-    top_indices = (-grad).topk(topk, dim=1).indices
     return top_indices
 
 
-def get_filtered_cands(tokenizer: object, control_cand: object, filter_cand: object = True,
-                       curr_control: object = None) -> object:
-    cands, count = [], 0
-    for i in range(control_cand.shape[0]):
-        decoded_str = tokenizer.decode(control_cand[i], skip_special_tokens=True)
-        if filter_cand:
-            if decoded_str != curr_control and len(tokenizer(decoded_str, add_special_tokens=False).input_ids) == len(
-                    control_cand[i]):
-                cands.append(decoded_str)
-            else:
-                count += 1
-        else:
-            cands.append(decoded_str)
-
-    if filter_cand:
-        cands = cands + [cands[-1]] * (len(control_cand) - len(cands))
-        # print(f"Warning: {round(count / len(control_cand), 2)} control candidates were not valid")
-    return cands
 def get_filtered_cands_random_search(tokenizer: object, adv_suffix_tokens: object, filter_cand: object = True,token_change_number=1,batch_size = 16) -> object:
 
     adv_suffix_list = []
@@ -181,19 +139,7 @@ def get_filtered_cands_random_search(tokenizer: object, adv_suffix_tokens: objec
         new_adv_suffix_tokens = adv_suffix_tokens[:substitute_pos_start]+substitution_tokens+adv_suffix_tokens[substitute_pos_start+n_tokens_change:]
         adv_suffix_list.append(new_adv_suffix_tokens)
     return adv_suffix_list
-def get_filtered_cands_kv_cache(tokenizer: object, adv_suffix_tokens: object, control_cand: object, filter_cand: object = True,token_change_number=1,batch_size = 16) -> object:
-
-    def check_consistency(adv_suffix_list):
-        #print(f"adv_suffix_list: {adv_suffix_list}")
-
-        for input_ids in adv_suffix_list:
-            start_idx = 0
-            for j in range(len(input_ids)):
-                if input_ids[j] != adv_suffix_tokens[j]:
-                    start_idx = j
-                    break
-            #print(f"Start position where different: {start_idx}")
-
+def get_filtered_cands(tokenizer: object, adv_suffix_tokens: object, control_cand: object, filter_cand: object = True,token_change_number=1,batch_size = 16) -> object:
 
     adv_suffix_list = []
     n_tokens_change = token_change_number
@@ -209,20 +155,15 @@ def get_filtered_cands_kv_cache(tokenizer: object, adv_suffix_tokens: object, co
             if not any(token in adv_suffix_tokens[substitute_pos_start:min(substitute_pos_start + n_tokens_change, len(adv_suffix_tokens))] for token in substitution_tokens):
                 break
                                             
-        #print(f"substitution_tokens: {substitution_tokens}")
-        #print(f"adv_suffix_tokens: {adv_suffix_tokens[substitute_pos_start:min(substitute_pos_start + n_tokens_change, len(adv_suffix_tokens))]}")
         new_adv_suffix_tokens = adv_suffix_tokens[:substitute_pos_start]+substitution_tokens+adv_suffix_tokens[substitute_pos_start+n_tokens_change:]
-        #print(f"adv_substitution_tokens: {substitution_tokens}")
+
         adv_suffix_list.append(new_adv_suffix_tokens)
-    #print(f"adv_suffix_list: {adv_suffix_list}")
-    #print(f"adv_suffix_tokens: {adv_suffix_tokens}")
-    check_consistency(adv_suffix_list)
 
     return adv_suffix_list
 
 
-def get_logits(*, model, tokenizer, input_ids, batch_size=512):
-    input_ids = torch.tensor(input_ids).to(model.device)
+def get_logits(*, model, tokenizer, input_ids_list, batch_size=512):
+    input_ids = torch.tensor(input_ids_list).to(model.device)
     with torch.no_grad():
         outputs = model(input_ids=input_ids)
     logits = outputs[0][:, :, :]
@@ -274,26 +215,19 @@ def get_logits_kv_cache(*, model, tokenizer, input_ids_list, kv_cache, kv_cache_
     gc.collect()
     return logits
 
-def target_loss(logits, ids, target_slice, imitate_target=None, use_log_prob=False):
-    if imitate_target is not None:
-        crit = nn.MSELoss(reduction='none')
-        loss_slice = slice(target_slice.start - 1, target_slice.stop - 1)
-        compare = logits[:, loss_slice, :].transpose(1, 2)
-        repeat_list = [compare.size()[0]] + [1] * (len(imitate_target.shape))
-        target = imitate_target.unsqueeze(0).repeat(*repeat_list).transpose(1, 2)
-        loss = crit(compare, target).mean(dim=-1)
-    elif use_log_prob:
-        loss_slice = slice(target_slice.start - 1, target_slice.stop - 1)
-        compare = logits[:, loss_slice, :].log_softmax(dim=-1)
-        target = ids[:, target_slice]
-        loss = -compare.gather(dim=-1, index=target.unsqueeze(-1)).squeeze(-1)
-    else:
-        crit = nn.CrossEntropyLoss(reduction='none')
-        loss_slice = slice(target_slice.start - 1, target_slice.stop - 1)
-        compare = logits[:, loss_slice, :].transpose(1, 2)
-        target = ids[:,target_slice]
-        loss = crit(compare, target)
-    return loss.mean(dim=-1)
+def target_loss(logits_positive, ids_positive, response_slice_positive, logits_negative, ids_negative, response_slice_negative):
+
+    crit = nn.CrossEntropyLoss(reduction='none')
+    positve_loss_slice = slice(response_slice_positive.start - 1, response_slice_positive.stop - 1)
+    negative_loss_slice = slice(response_slice_negative.start - 1, response_slice_negative.stop - 1)
+    compare_positive = logits_positive[:, positve_loss_slice, :].transpose(1, 2)
+    response_ids_postive = ids_positive[:,response_slice_positive]
+    compare_negative = logits_negative[:, negative_loss_slice, :].transpose(1, 2)
+    response_ids_negative = ids_negative[:,response_slice_negative]
+    #print(crit(compare_positive, response_ids_postive).shape)
+    #print(crit(compare_negative, response_ids_negative).shape)
+    loss = crit(compare_positive, response_ids_postive).mean(dim=-1) - crit(compare_negative, response_ids_negative).mean(dim=-1)
+    return loss
 
 def get_nonascii_toks(tokenizer, device='cpu'):
     def is_ascii(s):
@@ -352,47 +286,38 @@ def load_model_and_tokenizer(model_path, tokenizer_path=None, device='cuda:0', *
 
     return model, tokenizer
 
-def get_dataset(harmful_data, target_data, args):
-    return zip(harmful_data.instruction[args.start:args.end], harmful_data.input[args.start:args.end],
-                      harmful_data.output[args.start:args.end], harmful_data.task[args.start:args.end],
-                      harmful_data.dataset[args.start:args.end],target_data.instruction[args.start:args.end], target_data.input[args.start:args.end],
-                      target_data.output[args.start:args.end], target_data.task[args.start:args.end],
-                      target_data.dataset[args.start:args.end])
+def get_dataset(split="train"):
+    import json
+    if split == "train":
+        dataset = []
+        with open('./data/harmful_queries.json', 'r') as file:
+            harmful_queries = json.load(file)
+            for e in list(harmful_queries.values())[0:10]:
+                dataset.append((e[0], e[1], e[2]))
 
-def initialize_kv_cache(args,dataset,model,tokenizer,adv_ids_list,device):
-    kv_caches = []
-    input_ids_list = []
-    for i, (instruction, input, output, task, dataset_name,target_instruction, target_input, target_output, target_task, target_dataset_name) in enumerate(dataset):
+        with open('./data/benign_queries.json', 'r') as file:
+            benign_queries = json.load(file)
+            for e in list(benign_queries.keys())[0:5]:
+                dataset.append((e,benign_queries[e][0],benign_queries[e][1]))
 
-        target = query_target(args, instruction, output,target_output)
-        suffix_manager = SuffixManager(tokenizer=tokenizer,
-                                        instruction=instruction,
-                                        query=input,
-                                        target=target,
-                                        target_instruction=target_instruction,
-                                        target_query=target_input,
-                                        adv_ids_list=adv_ids_list,attack_type=args.injection)
+    elif split == "test_harmful":
+        with open('./data/harmful_queries.json', 'r') as file:
+            harmful_queries = json.load(file)
+            dataset = [query[0] for query in harmful_queries.values()][10:30]
+    elif split == "test_benign":
+        with open('./data/benign_queries.json', 'r') as file:
+            benign_queries = json.load(file)
+            dataset = list(benign_queries.keys())[10:30]
+    return dataset
 
-        input_ids = suffix_manager.get_input_ids_train()
-        input_ids = torch.tensor(input_ids).to(device)
-        with torch.no_grad():
 
-            outputs = model(input_ids, use_cache=True)
-            kv_cache = outputs.past_key_values  # extract kv_cache from the output
-        kv_caches.append(kv_cache)
-        input_ids_list.append(input_ids[0])
-    return kv_caches,input_ids_list
 
-def check_early_stopping(completions,targets,loss_history):
-    print(f"targets: {targets}")
+def check_early_stopping(completions,loss_history):
     count = 0
     for i in range(len(completions)):
-        if targets[i] in completions[i]:
+        if "sorry" in completions[i].lower():
             count += 1
-    if count == len(targets):
-        print("Success!")
-        return True
-    if count / len(completions) >= 0.9 and (len(loss_history) > 600 and loss_history[-200] - loss_history[-1] < 0.01):
+    if count / len(completions) >= 0.3 and (len(loss_history) > 600 and loss_history[-200] - loss_history[-1] < 0.01):
         print("success")
         return True
     if (len(loss_history) > 600 and loss_history[-500] - loss_history[-1] < 0.01):
