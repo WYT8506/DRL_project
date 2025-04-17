@@ -58,12 +58,11 @@ def get_args():
     parser.add_argument("--point", type=int, default=-1)
     parser.add_argument("--target", type=int, default=0)
     parser.add_argument("--model", type=str, default="mistral")
-    parser.add_argument("--evaluate", type=str, default="duplicate_sentence_detection")
     parser.add_argument("--target_dataset", type=str, default="sentiment_analysis")
     parser.add_argument("--dataset_path", type=str, default="./data/")
     parser.add_argument("--path", type=str, default="")
     parser.add_argument("--injection", type=str, default="dynamic")
-    parser.add_argument("--dataset", type=str, default="benign")
+    parser.add_argument("--dataset", type=str, default="harmful")
     args = parser.parse_args()
     return args
 
@@ -100,7 +99,7 @@ if __name__ == '__main__':
                                             query=query,
                                             positive_response="", 
                                             negative_response="",  
-                                            suffix_ids_list=[[]])
+                                            suffix_ids_list=[[3545, 19010, 26179, 8732, 19010, 24775, 28723, 3946, 19010, 4709, 6564, 19010, 4782, 1690, 14431, 1732, 18210, 11689, 2902, 19010, 27014, 19010, 23166, 3692, 19010, 28737, 19699, 14452, 24257, 9680, 9652, 19010, 19393, 1815, 27273, 10546, 4181, 20560, 28514, 20676, 19174, 10927, 23594, 8070, 12504, 4019, 25007, 2214, 3448, 19010]])
         prompt = torch.tensor(tokenizer.encode(suffix_manager.get_prompt())).to(device).unsqueeze(0)
         completion = tokenizer.decode(model.generate(prompt, 
                                 max_new_tokens=100,  

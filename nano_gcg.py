@@ -39,12 +39,12 @@ def get_args():
     parser.add_argument("--target", type=int, default=0)
     parser.add_argument("--tokens", type=int, default=50)
 
-    parser.add_argument("--device", type=int, default=0)
+    parser.add_argument("--device", type=int, default=1)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=20)    
-    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--batch_size", type=int, default=1)
     parser.add_argument("--topk", type=int, default=128)
-    parser.add_argument("--num_steps", type=int, default=1000)
+    parser.add_argument("--num_steps", type=int, default=10000)
     parser.add_argument("--use_kv", type=bool,default = True)                  
 
     parser.add_argument("--dataset_path", type=str, default="./data/uni_train.csv")
@@ -61,7 +61,7 @@ def get_args():
 if __name__ == '__main__':
     args = get_args()
     device = f'cuda:{args.device}'
-    wait_for_available_gpu_memory(required_memory_gb=70, device=args.device, check_interval=500)
+    #wait_for_available_gpu_memory(required_memory_gb=70, device=args.device, check_interval=500)
     model_path_dicts = {"mistral": "mistralai/Mistral-7B-Instruct-v0.2", "llama3": "meta-llama/Meta-Llama-3-8B-Instruct", "llama2": "meta-llama/Llama-2-7b-chat-hf", "vicuna": "./models/vicuna/vicuna-7b-v1.3",
                         "guanaco": "./models/guanaco/guanaco-7B-HF", "WizardLM": "./models/WizardLM/WizardLM-7B-V1.0",
                         "mpt-chat": "./models/mpt/mpt-7b-chat", "mpt-instruct": "./models/mpt/mpt-7b-instruct",

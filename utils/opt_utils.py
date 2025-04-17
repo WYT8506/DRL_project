@@ -252,6 +252,7 @@ def get_nonascii_toks(tokenizer, device='cpu'):
 def load_model_and_tokenizer(model_path, tokenizer_path=None, device='cuda:0', **kwargs):
     model = AutoModelForCausalLM.from_pretrained(
                 model_path, 
+                attn_implementation="flash_attention_2",
                 torch_dtype=torch.float16,
                 trust_remote_code=True).to(device).eval()
     #model = AutoModelForCausalLM.from_pretrained(
