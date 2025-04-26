@@ -13,6 +13,8 @@ from tqdm import tqdm
 import random
 from utils.opt_utils import check_early_stopping
 from utils.utils import generate
+from rl_agents import BanditAgent
+from rl_agents import PPOAgent
 seed = 20
 torch.manual_seed(seed)
 np.random.seed(seed)
@@ -34,18 +36,18 @@ def generate_pattern(length):
 
 def get_args():
     parser = argparse.ArgumentParser(description="Configs")
-
+    parser.add_argument("--rl_method", type=str, default="rl")
     parser.add_argument("--momentum", type=float, default=1.0)
     parser.add_argument("--target", type=int, default=0)
-    parser.add_argument("--tokens", type=int, default=50)
+    parser.add_argument("--tokens", type=int, default=20)
 
     parser.add_argument("--device", type=int, default=1)
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--end", type=int, default=20)    
-    parser.add_argument("--batch_size", type=int, default=1)
-    parser.add_argument("--topk", type=int, default=128)
+    parser.add_argument("--batch_size", type=int, default=16)
+    parser.add_argument("--topk", type=int, default=256)
     parser.add_argument("--num_steps", type=int, default=10000)
-    parser.add_argument("--use_kv", type=bool,default = True)                  
+    parser.add_argument("--use_kv", type=bool,default = True)
 
     parser.add_argument("--dataset_path", type=str, default="./data/uni_train.csv")
     parser.add_argument("--target_dataset_path", type=str, default="./data/sentiment_analysis/data.csv")
@@ -85,24 +87,55 @@ if __name__ == '__main__':
     suffix_tokens = remove_bos_token(tokenizer,tokenizer.encode(suffix_string_init))
     best_suffix_loss = 1e10
     suffix_search_space = torch.randint(0, 30000, (1000, 128))
+    bandit = BanditAgent(candidate_sizes=[16, 64, 256], token_changes=[1, 2])
+    PPO_agent = PPOAgent(state_dim=2, action_dim=2)
+    max_buffer_size = 500
 
+    PPO_states = []
+    PPO_actions = []
+    PPO_rewards = []
+    PPO_old_logprobs = []
     kv_caches = []
+
     dataset = get_dataset(split="train")
     #print(f"dataset: {dataset}")
     loss_history = []
+    suffix_length_history = []
     for j in tqdm(range(num_steps)):
         start_time = time.time()
         log = log_init()
         info = {"goal": "", "target": "", "final_suffix": "",
                 "final_respond": "", "total_time": 0, "is_success": False, "log": log}
         dataset = get_dataset(split="train")
+        selected_arm = bandit.select_arm()
+        if len(loss_history) ==0:
+            loss_decrease=0
+        else:
+            loss_decrease=loss_history[-1]-loss_history[-min(100,len(loss_history)-1)]
+        if len(suffix_length_history) ==0:
+            suffix_length_change=0
+        else:
+            suffix_length_change = suffix_length_history[-1]-suffix_length_history[-min(100,len(suffix_length_history)-1)]
+        state_tensor = torch.tensor([suffix_length_change,loss_decrease], dtype=torch.float32)
+        PPO_action, PPO_logprob = PPO_agent.act(state_tensor)
 
+        if "rl" in args.rl_method:
+            topk, token_change_num = selected_arm
+            if j%5==0:
+                print(f"Step {j}: Selected action (candidate_set_size, token_change_count) = {selected_arm}")
+                bandit.print_arms()
+        else:
+            topk = args.topk
+            token_change_num = 2
         new_suffix = get_filtered_cands(tokenizer,
                                         suffix_tokens,
                                         suffix_search_space,
                                         filter_cand=False,
+                                        token_change_number=token_change_num,
                                         batch_size=args.batch_size)
-
+        if PPO_action == 1:
+            for e in new_suffix:
+                e = e+[e[-1]]
         losses = 0
         correct_losses = 0
         start_logits_time = time.time()
@@ -133,8 +166,36 @@ if __name__ == '__main__':
         #print(f"logits_time: {end_logits_time-start_logits_time}")
         
         completions = []
+        bandit.update(selected_arm, max(0,min(1,best_suffix_loss-(losses.min()/(len(dataset)))) ))
+        if "rl" in args.rl_method:
+            #Update PPO agent
+            #if losses.min()/(len(dataset)) < best_suffix_loss:
+            PPO_reward = min(1,best_suffix_loss-(losses.min()/(len(dataset))))/(end_logits_time-start_logits_time)
+
+            PPO_states.append(state_tensor)
+            PPO_actions.append(torch.tensor(PPO_action))
+            PPO_rewards.append(PPO_reward)
+            PPO_old_logprobs.append(PPO_logprob)
+
+            # If buffer full, update PPO
+            if len(PPO_states) >= max_buffer_size:
+                states_batch = torch.stack(PPO_states)
+                actions_batch = torch.stack(PPO_actions)
+                old_logprobs_batch = torch.stack(PPO_old_logprobs)
+
+                PPO_agent.update(states_batch, actions_batch, PPO_rewards, old_logprobs_batch)
+
+                # Clear buffer
+                PPO_states = PPO_states[-max_buffer_size:]
+                PPO_actions= PPO_actions[-max_buffer_size:]
+                PPO_rewards = PPO_rewards[-max_buffer_size:]
+                PPO_old_logprobs = PPO_old_logprobs[-max_buffer_size:]
+        
         if losses.min()/(len(dataset)) < best_suffix_loss:
             suffix_tokens= new_suffix[losses.argmin()]
+            if "rl" in args.rl_method:
+                print(f"PPO_action: {PPO_action}")
+             # 19010 is the token_id for "!!!!"
             #print(f"best_adv_suffix: {best_adv_suffix}")
             best_suffix_loss = losses.min()/(len(dataset))
             coordinate_grad = 0
@@ -211,10 +272,11 @@ if __name__ == '__main__':
             os.makedirs(
                 f"./results/{args.model}")
         with open(
-                f'./results/{args.model}/{args.model}.json',
+                f'./results/{args.model}/{args.model}_{args.rl_method}_{batch_size}_{args.tokens}.json',
                 'w') as json_file:
             json.dump(infos, json_file)
         loss_history.append(best_suffix_loss.item())
+        suffix_length_history.append(len(suffix_tokens))
         #if len(loss_history) > 200 and loss_history[-100]-loss_history[-1]<0.001:
            # break
         if len(completions) > 0:

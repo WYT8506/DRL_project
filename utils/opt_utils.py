@@ -227,6 +227,9 @@ def target_loss(logits_positive, ids_positive, response_slice_positive, logits_n
     #print(crit(compare_positive, response_ids_postive).shape)
     #print(crit(compare_negative, response_ids_negative).shape)
     loss = crit(compare_positive, response_ids_postive).mean(dim=-1) - crit(compare_negative, response_ids_negative).mean(dim=-1)
+
+    sigmoid_loss = torch.sigmoid(loss)
+    loss = -torch.log(sigmoid_loss)
     return loss
 
 def get_nonascii_toks(tokenizer, device='cpu'):
