@@ -134,10 +134,14 @@ if __name__ == '__main__':
                                         token_change_number=token_change_num,
                                         batch_size=args.batch_size)
         extended_losses = None
+        start_logits_time = time.time()
         if PPO_action == 1:
             extended_suffix = []
             for e in new_suffix:
-                extended_suffix.append(e+[e[-1]])
+                # Insert space token at random location
+                random_idx = random.randint(0, len(e))
+                e_with_space = e[:random_idx] + [tokenizer.encode(" ")[0]] + e[random_idx:]
+                extended_suffix.append(e_with_space)
                 losses = 0
             extended_losses = 0
 
@@ -163,7 +167,7 @@ if __name__ == '__main__':
 
         losses = 0
         correct_losses = 0
-        start_logits_time = time.time()
+        
         for i, (query,positive_response,negative_response) in enumerate(dataset):
   
             suffix_manager = SuffixManager(args,tokenizer=tokenizer,
