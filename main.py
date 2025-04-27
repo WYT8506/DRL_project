@@ -133,9 +133,34 @@ if __name__ == '__main__':
                                         filter_cand=False,
                                         token_change_number=token_change_num,
                                         batch_size=args.batch_size)
+        extended_losses = None
         if PPO_action == 1:
+            extended_suffix = []
             for e in new_suffix:
-                e = e+[e[-1]]
+                extended_suffix.append(e+[e[-1]])
+                losses = 0
+            extended_losses = 0
+
+            for i, (query,positive_response,negative_response) in enumerate(dataset):
+    
+                suffix_manager = SuffixManager(args,tokenizer=tokenizer,
+                                            query = query,
+                                            positive_response = positive_response,
+                                            negative_response = negative_response,
+                                            suffix_ids_list=extended_suffix)
+            
+                input_ids_positive,input_ids_negative = suffix_manager.get_input_ids_train()
+                input_ids_positive = torch.tensor(input_ids_positive).to(device)
+                input_ids_negative = torch.tensor(input_ids_negative).to(device)
+                with torch.no_grad():
+                    logits_positive= get_logits(model=model,
+                                            tokenizer=tokenizer,
+                                            input_ids_list=input_ids_positive)
+                    logits_negative= get_logits(model=model,
+                            tokenizer=tokenizer,
+                            input_ids_list=input_ids_negative)
+                    extended_losses += target_loss(logits_positive, input_ids_positive,suffix_manager._positive_response_slice,logits_negative, input_ids_negative, suffix_manager._negative_response_slice)
+
         losses = 0
         correct_losses = 0
         start_logits_time = time.time()
@@ -166,11 +191,12 @@ if __name__ == '__main__':
         #print(f"logits_time: {end_logits_time-start_logits_time}")
         
         completions = []
-        bandit.update(selected_arm, max(0,min(1,best_suffix_loss-(losses.min()/(len(dataset)))) ))
+        bandit.update(selected_arm, min(1,best_suffix_loss-(losses.min()/(len(dataset)))) )
         if "rl" in args.rl_method:
             #Update PPO agent
             #if losses.min()/(len(dataset)) < best_suffix_loss:
-            PPO_reward = min(1,best_suffix_loss-(losses.min()/(len(dataset))))/(end_logits_time-start_logits_time)
+            new_loss = losses.min()/(len(dataset))
+            PPO_reward = min(1,best_suffix_loss-(new_loss))/(end_logits_time-start_logits_time)
 
             PPO_states.append(state_tensor)
             PPO_actions.append(torch.tensor(PPO_action))
@@ -191,13 +217,16 @@ if __name__ == '__main__':
                 PPO_rewards = PPO_rewards[-max_buffer_size:]
                 PPO_old_logprobs = PPO_old_logprobs[-max_buffer_size:]
         
-        if losses.min()/(len(dataset)) < best_suffix_loss:
-            suffix_tokens= new_suffix[losses.argmin()]
-            if "rl" in args.rl_method:
-                print(f"PPO_action: {PPO_action}")
+
+        if losses.min()/(len(dataset)) <= best_suffix_loss or (extended_losses is not None and extended_losses.min()/(len(dataset)) <= best_suffix_loss):
+            if losses.min()/(len(dataset)) <= best_suffix_loss:
+                suffix_tokens= new_suffix[losses.argmin()]
+                best_suffix_loss = losses.min()/(len(dataset))
+            else:
+                suffix_tokens= extended_suffix[extended_losses.argmin()]
+                best_suffix_loss = extended_losses.min()/(len(dataset))
              # 19010 is the token_id for "!!!!"
             #print(f"best_adv_suffix: {best_adv_suffix}")
-            best_suffix_loss = losses.min()/(len(dataset))
             coordinate_grad = 0
             #print("dataset: ", dataset)
             for i, (query,positive_response,negative_response) in enumerate(dataset):
