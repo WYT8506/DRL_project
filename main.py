@@ -200,7 +200,11 @@ if __name__ == '__main__':
             #Update PPO agent
             #if losses.min()/(len(dataset)) < best_suffix_loss:
             new_loss = losses.min()/(len(dataset))
-            PPO_reward = min(1,best_suffix_loss-(new_loss))/(end_logits_time-start_logits_time)
+            new_loss_extended = extended_losses.min()/(len(dataset))
+            if PPO_action == 0:
+                PPO_reward = min(1,best_suffix_loss-(new_loss))/(end_logits_time-start_logits_time)
+            else:
+                PPO_reward = min(1,best_suffix_loss-(new_loss_extended))/(end_logits_time-start_logits_time)
 
             PPO_states.append(state_tensor)
             PPO_actions.append(torch.tensor(PPO_action))
